@@ -1,0 +1,8 @@
+{
+  "name": "gif-studio",
+  "private": true,
+  "description": "PC에서 동영상을 30FPS GIF 애니메이션으로 변환합니다.",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

@@ -1,0 +1,105 @@
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Video를 GIF로 변환</title>
+<HTA:APPLICATION
+  ID="gifstudio"
+  APPLICATIONNAME="GIF 변환"
+  BORDER="thin"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+  SINGLEINSTANCE="yes"
+  SYSMENU="yes"
+  MAXIMIZEBUTTON="yes"
+  MINIMIZEBUTTON="yes"
+  SCROLL="no"
+  WINDOWSTATE="normal"
+  INNERBORDER="no" />
+<script language="javascript">
+function appDir() {
+  var path = unescape(document.location.pathname || "");
+  if (path.charAt(0) === "/") path = path.substring(1);
+  path = path.replace(/\//g, "\\");
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  return fso.GetParentFolderName(path);
+}
+
+function healthy() {
+  try {
+    var http = new ActiveXObject("MSXML2.XMLHTTP");
+    http.open("GET", "http://127.0.0.1:4173/api/health", false);
+    http.send();
+    return http.status === 200;
+  } catch (error) {
+    return false;
+  }
+}
+
+function edgePath(shell) {
+  var fso = new ActiveXObject("Scripting.FileSystemObject");
+  var names = ["msedge.exe", "chrome.exe"];
+  var roots = [
+    "HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\",
+    "HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\"
+  ];
+  var name, root, found;
+  for (name = 0; name < names.length; name += 1) {
+    for (root = 0; root < roots.length; root += 1) {
+      try {
+        found = shell.RegRead(roots[root] + names[name] + "\\");
+        if (found && fso.FileExists(found)) return found;
+      } catch (error) {}
+    }
+  }
+  var program = shell.ExpandEnvironmentStrings("%ProgramFiles%");
+  var local = shell.ExpandEnvironmentStrings("%LocalAppData%");
+  var candidates = [
+    program + " (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    program + "\\Microsoft\\Edge\\Application\\msedge.exe",
+    local + "\\Google\\Chrome\\Application\\chrome.exe",
+    program + "\\Google\\Chrome\\Application\\chrome.exe"
+  ];
+  var i;
+  for (i = 0; i < candidates.length; i += 1) {
+    if (fso.FileExists(candidates[i])) return candidates[i];
+  }
+  return "";
+}
+
+function boot() {
+  var shell = new ActiveXObject("WScript.Shell");
+  var dir = appDir();
+  if (!healthy()) {
+    shell.Run('cmd /c cd /d "' + dir + '" && node server.js', 0, false);
+    var tries = 0;
+    while (tries < 30 && !healthy()) {
+      shell.Run("cmd /c ping -n 2 127.0.0.1 > nul", 0, true);
+      tries += 1;
+    }
+  }
+  if (!healthy()) {
+    document.getElementById("status").innerText = "서버를 시작하지 못했습니다. Node.js 설치 여부를 확인해 주세요.";
+    return;
+  }
+  var browser = edgePath(shell);
+  var target = "http://127.0.0.1:4173/index.html";
+  if (browser) {
+    shell.Run('"' + browser + '" --app=' + target + " --window-size=1360,900", 1, false);
+  } else {
+    shell.Run('cmd /c start "" "' + target + '"', 1, false);
+  }
+  window.close();
+}
+</script>
+<style>
+body { margin: 0; font-family: "Malgun Gothic", sans-serif; background: #e6e0d4; color: #1c1713; }
+main { padding: 48px; }
+</style>
+</head>
+<body onload="boot()">
+<main>
+  <h1>Video를 GIF로 변환</h1>
+  <p id="status">앱을 준비하고 있습니다.</p>
+</main>
+</body>
+</html>

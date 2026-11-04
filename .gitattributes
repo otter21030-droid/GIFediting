@@ -1,0 +1,2 @@
+gif-studio/bin/ffmpeg.exe filter=lfs diff=lfs merge=lfs -text
+gif-studio/bin/ffprobe.exe filter=lfs diff=lfs merge=lfs -text
