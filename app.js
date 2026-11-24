@@ -449,7 +449,8 @@ function markFormat(ext) {
 
 function setProgress(percent, phase) {
   if (continuingConversion && Number(percent) === 0) return;
-  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  let value = Math.max(0, Math.min(100, Math.round(percent)));
+  if (continuingConversion) value = Math.max(value, Number(progressTrack.getAttribute("aria-valuenow")) || 0);
   progressFill.style.width = `${value}%`;
   progressTrack.setAttribute("aria-valuenow", String(value));
   percentLabel.textContent = `${value}%`;

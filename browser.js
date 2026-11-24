@@ -10,7 +10,6 @@ const GifBrowser = (() => {
   let lastControlAction = null;
   let operationVersion = 0;
   let engineVersion = 0;
-  let pauseRequested = false;
   let resumeCheckpoint = null;
   let inputName = "";
   let inputInfo = null;
@@ -487,8 +486,11 @@ const GifBrowser = (() => {
       return;
     }
     const saved = resumeCheckpoint;
-    const checkpoint = saved && saved.id === info.id && JSON.stringify(saved.body) === JSON.stringify(body) ? saved.stage : "preview";
-    if (!saved || checkpoint === "preview") resumeCheckpoint = null;
+    const canResume = saved && saved.id === info.id && JSON.stringify(saved.body) === JSON.stringify(body);
+    const checkpoint = canResume ? saved.stage : "preview";
+    if (!canResume) {
+      resumeCheckpoint = { id: info.id, body: JSON.parse(JSON.stringify(body)), stage: "preview", paletteBytes: null };
+    }
     controlAction = null;
     lastControlAction = null;
     const operation = ++operationVersion;
@@ -519,14 +521,6 @@ const GifBrowser = (() => {
         ? `[0:v]${filter.vf}[base];[1:v]scale=${size.width}:${size.height}:flags=lanczos[ov];[base][ov]overlay=0:0:format=auto:shortest=1`
         : "";
       const withVideo = (graph) => (overlay ? `${chain},${graph}` : null);
-      const pauseHere = (stage) => {
-        if (!pauseRequested) return false;
-        resumeCheckpoint = { id: info.id, body: JSON.parse(JSON.stringify(body)), stage };
-        pauseRequested = false;
-        controlAction = null;
-        onEvent({ type: "paused" });
-        return true;
-      };
       if (checkpoint === "preview") {
         emit("extract", 0.08);
         try {
@@ -537,10 +531,11 @@ const GifBrowser = (() => {
         } catch (error) {
           if (error.controlled) throw error;
         }
-        if (pauseHere("palette")) return;
+        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
         emit("extract", 1);
       }
       if (checkpoint === "preview" || checkpoint === "palette") {
+        resumeCheckpoint.stage = "palette";
         emit("palette", 0.1);
         const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
         paletteArgs.push("-an");
@@ -548,9 +543,13 @@ const GifBrowser = (() => {
         if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
         else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
         await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, expected);
-        if (pauseHere("encode")) return;
+        resumeCheckpoint.paletteBytes = await ff.readFile("palette.png");
+        resumeCheckpoint.stage = "encode";
+      } else if (checkpoint === "encode" && saved?.paletteBytes) {
+        await ff.writeFile("palette.png", saved.paletteBytes);
       }
       if (checkpoint !== "read") {
+        resumeCheckpoint.stage = "encode";
         emit("encode", 0.05);
         const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
         const paletteIndex = overlay ? "2" : "1";
@@ -560,7 +559,6 @@ const GifBrowser = (() => {
         gifArgs.push("-an", "-filter_complex", gifGraph, "-loop", options.loop ? "0" : "-1", "out.gif");
         await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
         if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
-        if (pauseHere("read")) return;
       }
       const gif = await readBlob(ff, "out.gif", "image/gif");
       await ff.deleteFile("palette.png").catch(() => {});
@@ -601,20 +599,16 @@ const GifBrowser = (() => {
         controlAction = null;
         lastControlAction = null;
       }
-      if (action === "stop" || action === "cancel") onEvent({ type: action === "stop" ? "stopped" : "cancelled" });
+      if (action === "stop") onEvent({ type: "paused" });
+      else if (action === "cancel") onEvent({ type: "cancelled" });
       else onEvent({ type: "error", message: "변환 중 문제가 생겼습니다. 다른 동영상 파일로 다시 시도해 주세요." });
     }
   }
 
   function control(action) {
-    if (action === "stop") {
-      pauseRequested = true;
-      return;
-    }
     controlAction = action;
     lastControlAction = action;
-    pauseRequested = false;
-    resumeCheckpoint = null;
+    if (action === "cancel") resumeCheckpoint = null;
     operationVersion += 1;
     engineVersion += 1;
     inputReady = false;
