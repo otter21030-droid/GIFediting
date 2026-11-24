@@ -5,6 +5,7 @@
   function $(selector, parent) { return (parent || document).querySelector(selector); }
   const drop = $("#gifDrop");
   const input = $("#gifFile");
+  const fileQueue = $("#gifFileQueue");
   const alertBox = $("#gifAlert");
   const workspace = $("#editorWorkspace");
   const originalGif = $("#originalGif");
@@ -18,6 +19,12 @@
   const errorBox = $("#editorError");
   const resultPanel = $("#resultPanel");
   const saveConfig = $("#saveConfig");
+  const editAgainButton = document.createElement("button");
+  editAgainButton.type = "button";
+  editAgainButton.className = "btn cancel";
+  editAgainButton.textContent = "편집본 수정";
+  editAgainButton.hidden = true;
+  saveConfig.append(editAgainButton);
 
   const toolNames = {
     resize: "Resize", crop: "Crop", downsize: "Downsizing", format: "Format Convert",
@@ -33,6 +40,7 @@
   let resultType = "image/gif";
   let selectedTool = "";
   let job = 0;
+  let editorFiles = [];
 
   function message(text, isError = true) {
     alertBox.hidden = !text;
@@ -138,6 +146,7 @@
     sourceBytes = bytes;
     sourceMeta = meta;
     resultBlob = null;
+    editAgainButton.hidden = true;
     resultPanel.hidden = true;
     saveConfig.hidden = true;
     workspace.hidden = false;
@@ -326,6 +335,7 @@
       resultPanel.hidden = false;
       if (name === "resize") $("#originalBody").hidden = true;
       saveConfig.hidden = false;
+      editAgainButton.hidden = resultType !== "image/gif";
       picker.hidden = true;
       config.hidden = true;
     $("#saveFilename").value = `${sourceFile.name.replace(/\.gif$/i, "")}_ed.${ext}`;
@@ -445,11 +455,60 @@
     }
   }
 
+  editAgainButton.addEventListener("click", async () => {
+    if (!resultBlob || resultType !== "image/gif") return;
+    const revised = new File([resultBlob], resultName, { type: "image/gif" });
+    const bytes = new Uint8Array(await revised.arrayBuffer());
+    const meta = readGifMeta(bytes);
+    if (!meta) return;
+    sourceFile = revised;
+    sourceBytes = bytes;
+    sourceMeta = meta;
+    originalGif.src = URL.createObjectURL(revised);
+    $("#originalMeta").textContent = `${revised.name} · ${humanBytes(revised.size)}`;
+    $("#originalInfo").innerHTML = metaMarkup(meta, revised.size);
+    $("#saveFilename").value = `${revised.name.replace(/\.gif$/i, "")}_ed.gif`;
+    resultPanel.hidden = true;
+    saveConfig.hidden = true;
+    picker.hidden = false;
+    config.hidden = true;
+    picker.querySelectorAll("button").forEach((button) => button.classList.remove("selected"));
+    selectTool(selectedTool || "resize");
+    status.textContent = "편집본을 다시 수정할 수 있습니다";
+  });
+
   $("#gifPick").addEventListener("click", () => input.click());
-  input.addEventListener("change", () => { if (input.files?.[0]) loadGif(input.files[0]); input.value = ""; });
+  input.addEventListener("change", () => {
+    editorFiles = [...(input.files || [])].filter((file) => /\.gif$/i.test(file.name));
+    fileQueue.replaceChildren();
+    fileQueue.hidden = editorFiles.length < 2;
+    editorFiles.forEach((file, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${index + 1}. ${file.name}`;
+      button.addEventListener("click", () => loadGif(file));
+      fileQueue.append(button);
+    });
+    const rejected = [...(input.files || [])].find((file) => !/\.gif$/i.test(file.name));
+    if (rejected) message(`${rejected.name}: 편집 가능한 형식은 GIF입니다.`, true);
+    if (editorFiles[0]) loadGif(editorFiles[0]);
+    input.value = "";
+  });
   for (const type of ["dragenter", "dragover"]) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.add("drag-over"); });
   for (const type of ["dragleave", "drop"]) drop.addEventListener(type, (event) => { event.preventDefault(); drop.classList.remove("drag-over"); });
-  drop.addEventListener("drop", (event) => { const files = [...(event.dataTransfer?.files || [])]; if (files.length !== 1) return message("한 번에 GIF 파일 하나만 선택해 주세요."); loadGif(files[0]); });
+  drop.addEventListener("drop", (event) => {
+    const files = [...(event.dataTransfer?.files || [])];
+    editorFiles = files.filter((file) => /\.gif$/i.test(file.name));
+    fileQueue.replaceChildren();
+    fileQueue.hidden = editorFiles.length < 2;
+    editorFiles.forEach((file, index) => {
+      const button = document.createElement("button"); button.type = "button"; button.textContent = `${index + 1}. ${file.name}`;
+      button.addEventListener("click", () => loadGif(file)); fileQueue.append(button);
+    });
+    const rejected = files.find((file) => !/\.gif$/i.test(file.name));
+    if (rejected) message(`${rejected.name}: 편집 가능한 형식은 GIF입니다.`, true);
+    if (editorFiles[0]) loadGif(editorFiles[0]);
+  });
   picker.addEventListener("click", (event) => {
     const button = event.target.closest("button[data-tool]");
     if (button && sourceFile) selectTool(button.dataset.tool);

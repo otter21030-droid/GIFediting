@@ -26,8 +26,9 @@
       <section class="gif-drop" id="gifDrop">
         <div><b>GIF 파일을 여기에 놓으세요</b><span id="gifDropStatus">한 번에 파일 하나를 편집합니다.</span></div>
         <button class="btn primary" id="gifPick" type="button">GIF 파일 선택</button>
-        <input id="gifFile" type="file" accept="image/gif,.gif" hidden />
+        <input id="gifFile" type="file" accept="image/gif,.gif" multiple hidden />
       </section>
+      <nav class="gif-file-queue" id="gifFileQueue" hidden aria-label="GIF 작업 목록"></nav>
       <div class="gif-alert" id="gifAlert" hidden></div>
 
       <section class="editor-workspace" id="editorWorkspace" hidden>

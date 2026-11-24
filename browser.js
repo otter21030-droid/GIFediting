@@ -7,6 +7,9 @@ const GifBrowser = (() => {
   let ffmpeg = null;
   let loading = null;
   let controlAction = null;
+  let lastControlAction = null;
+  let operationVersion = 0;
+  let engineVersion = 0;
   let inputName = "";
   let inputInfo = null;
   let sourceBytes = null;
@@ -74,6 +77,7 @@ const GifBrowser = (() => {
   async function engine() {
     if (ffmpeg) return ffmpeg;
     if (!loading) {
+      const version = engineVersion;
       loading = (async () => {
         const module = await import(FFMPEG);
         const instance = new module.FFmpeg();
@@ -81,55 +85,74 @@ const GifBrowser = (() => {
           coreURL: CORE_JS,
           wasmURL: CORE_WASM,
         });
+        if (version !== engineVersion) {
+          instance.terminate();
+          throw new Error("conversion interrupted");
+        }
         ffmpeg = instance;
         return instance;
       })().catch((error) => {
-        loading = null;
-        ffmpeg = null;
+        if (version === engineVersion) {
+          loading = null;
+          ffmpeg = null;
+        }
         throw error;
       });
     }
     return loading;
   }
 
-  function controlled(error) {
-    if (controlAction) {
-      const action = controlAction;
-      controlAction = null;
-      error.controlled = action;
-    }
+  function controlled(error, action = lastControlAction || controlAction) {
+    if (action) error.controlled = action;
     return error;
   }
 
-  async function run(ff, args, onRatio, span) {
-    if (controlAction) throw controlled(new Error(controlAction));
+  async function run(ff, args, onRatio, span, operation, expectedFrames) {
+    if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
     const lines = [];
+    let ratio = 0;
+    const report = (value) => {
+      if (!onRatio || operation !== operationVersion) return;
+      ratio = Math.max(ratio, Math.min(0.96, Math.max(0, Number(value) || 0)));
+      onRatio(ratio);
+    };
     const onLog = ({ message }) => {
       if (message) lines.push(message);
       const frame = String(message || "").match(/frame=\s*(\d+)/);
-      if (frame && onRatio) onRatio(0, Number(frame[1]));
+      if (frame && expectedFrames) report(Number(frame[1]) / expectedFrames);
     };
     const onProgress = ({ progress, time }) => {
       if (!onRatio) return;
-      if (progress > 0 && progress <= 1) onRatio(progress, 0);
+      if (progress > 0 && progress <= 1) report(progress);
       else if (span > 0 && time > 0) {
         const seconds = time > 100000 ? time / 1e6 : time / 1000;
-        onRatio(Math.min(1, seconds / span), 0);
+        report(Math.min(1, seconds / span));
       }
     };
+    const ticker = setInterval(() => {
+      if (operation !== operationVersion || ratio >= 0.96) return;
+      report(ratio + Math.max(0.004, (0.96 - ratio) * 0.018));
+    }, 180);
     ff.on("log", onLog);
     ff.on("progress", onProgress);
     try {
       const code = await ff.exec(args);
-      if (controlAction) throw controlled(new Error(controlAction));
+      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       if (code !== 0) {
         const error = new Error(lines.slice(-8).join("\n") || "ffmpeg");
         error.ffmpeg = true;
         throw error;
       }
+      for (let step = 1; step <= 20; step += 1) {
+        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+        ratio = Math.max(ratio, 0.96 + (0.04 * step) / 20);
+        if (onRatio) onRatio(Math.min(1, ratio));
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
     } catch (error) {
-      throw controlled(error);
+      throw controlled(error, operation !== operationVersion ? lastControlAction || controlAction : "");
     } finally {
+      clearInterval(ticker);
       ff.off("log", onLog);
       ff.off("progress", onProgress);
     }
@@ -462,6 +485,8 @@ const GifBrowser = (() => {
       return;
     }
     controlAction = null;
+    lastControlAction = null;
+    const operation = ++operationVersion;
     const filter = videoFilter(info, options);
     const size = outputSize(info, filter, options);
     const expected = Math.max(1, Math.round(options.span * filter.rate));
@@ -472,6 +497,7 @@ const GifBrowser = (() => {
     };
     try {
       const ff = await engine();
+      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       if (!inputReady) {
         if (!sourceBytes) throw new Error("missing");
         await ff.writeFile(inputName, sourceBytes);
@@ -501,7 +527,7 @@ const GifBrowser = (() => {
       const paletteGraph = `palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`;
       if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
       else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
-      await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span);
+      await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, expected);
       emit("encode", 0.05);
       const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
       const paletteIndex = overlay ? "2" : "1";
@@ -516,7 +542,8 @@ const GifBrowser = (() => {
         options.loop ? "0" : "-1",
         "out.gif",
       );
-      await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span);
+      await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
+      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       const gif = await readBlob(ff, "out.gif", "image/gif");
       await ff.deleteFile("palette.png").catch(() => {});
       await ff.deleteFile("out.gif").catch(() => {});
@@ -549,8 +576,12 @@ const GifBrowser = (() => {
         downloadUrl: urls.get(`download-${info.id}`),
       });
     } catch (error) {
-      const action = error.controlled || controlAction;
-      controlAction = null;
+      const action = error.controlled || (operation !== operationVersion ? lastControlAction : controlAction);
+      if (operation === operationVersion) controlAction = null;
+      else if (operationVersion === operation + 1) {
+        controlAction = null;
+        lastControlAction = null;
+      }
       if (action === "stop" || action === "cancel") onEvent({ type: action === "stop" ? "stopped" : "cancelled" });
       else onEvent({ type: "error", message: "변환 중 문제가 생겼습니다. 다른 동영상 파일로 다시 시도해 주세요." });
     }
@@ -558,11 +589,16 @@ const GifBrowser = (() => {
 
   function control(action) {
     controlAction = action;
+    lastControlAction = action;
+    operationVersion += 1;
+    engineVersion += 1;
     inputReady = false;
     const current = ffmpeg;
     ffmpeg = null;
     loading = null;
-    if (current) current.terminate();
+    if (current) {
+      try { current.terminate(); } catch (_) {}
+    }
   }
 
   return { inspect, convert, control, library, remove };

@@ -567,6 +567,15 @@ main {
   border-top: 1px solid var(--line);
 }
 
+.generator-tool-nav { position: sticky; top: 58px; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; padding: 10px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,253,248,.96); box-shadow: 0 6px 20px rgba(40,30,20,.08); }
+.generator-tool-nav button, .batch-queue button { min-height: 38px; padding: 0 14px; border: 1px solid var(--line); border-radius: 10px; background: #fff; color: var(--ink); font-weight: 750; cursor: pointer; }
+.generator-tool-nav button[aria-pressed="true"] { border-color: var(--accent); background: #fff0e9; color: var(--accent-deep); }
+.generator-tool-panel { padding: 2px 4px 12px; }
+.generator-tool-panel[hidden] { display: none; }
+.batch-queue { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.batch-queue strong { margin-right: 6px; }
+.batch-queue[hidden] { display: none; }
+
 .edit-block h2 { margin-bottom: 6px; }
 
 .choice-row {

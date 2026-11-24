@@ -11,6 +11,9 @@
 .editor-hero > p:last-child { margin: 12px 0 0; color: #51473d; font-size: 22px; font-weight: 700; }
 .gif-drop { display: flex; align-items: center; justify-content: space-between; gap: 24px; min-height: 110px; padding: 24px 30px; border: 1.5px dashed #bdab95; border-radius: 20px; background: rgba(255,253,248,.8); box-shadow: var(--shadow); }
 .gif-drop.drag-over { border-color: var(--accent); background: #fff4ec; }
+.gif-file-queue { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.gif-file-queue button { min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px; background: white; color: var(--ink); font-weight: 700; cursor: pointer; }
+.gif-file-queue[hidden] { display: none; }
 .gif-drop b, .gif-drop span { display: block; }
 .gif-drop b { font-size: 19px; }
 .gif-drop span { margin-top: 7px; color: var(--muted); font-size: 14px; }

@@ -31,8 +31,9 @@
           <p class="drop-sub" id="dropStatus">한 번에 하나의 파일만 불러옵니다.</p>
         </div>
         <button type="button" class="btn primary" id="pickBtn">폴더에서 선택</button>
-        <input id="fileInput" class="sr-file" type="file" aria-label="동영상 파일 하나 선택" />
+        <input id="fileInput" class="sr-file" type="file" multiple aria-label="동영상 파일 선택" />
       </section>
+      <div class="batch-queue" id="batchQueue" hidden></div>
 
       <section class="formats" id="formatSection" aria-labelledby="formatHeading">
         <div class="notice" id="notice" hidden></div>

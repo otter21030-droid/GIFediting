@@ -116,6 +116,7 @@ const saveName = document.querySelector("#saveName");
 const filmstrip = document.querySelector("#filmstrip");
 const currentThumb = document.querySelector("#currentThumb");
 const currentCaption = document.querySelector("#currentCaption");
+const batchQueueElement = document.querySelector("#batchQueue");
 
 const meta = {
   name: document.querySelector("#metaName"),
@@ -145,9 +146,44 @@ let busy = false;
 let dragDepth = 0;
 let cropDrag = null;
 let browserMode = false;
+let queuedVideoFiles = [];
+
+function initializeGeneratorTools() {
+  const blocks = [...details.querySelectorAll(":scope > .edit-block, :scope > .size-block, :scope > .loop-line, :scope > .convert-row")];
+  const tools = [
+    ["quality", "화질", [blocks[0]]], ["crop", "비율·자르기", [blocks[1]]],
+    ["trim", "구간", [blocks[2]]], ["stickers", "스티커", [blocks[3]]],
+    ["text", "텍스트", [blocks[4]]], ["output", "크기·변환", blocks.slice(5)],
+  ];
+  const nav = document.createElement("nav");
+  nav.className = "generator-tool-nav";
+  nav.setAttribute("aria-label", "GIF 생성 도구");
+  const panels = document.createElement("div");
+  panels.className = "generator-tool-panels";
+  for (const [id, label, elements] of tools) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(id === "quality"));
+    button.addEventListener("click", () => {
+      nav.querySelectorAll("button").forEach((item) => item.setAttribute("aria-pressed", String(item === button)));
+      panels.querySelectorAll("[data-generator-panel]").forEach((panel) => { panel.hidden = panel.dataset.generatorPanel !== id; });
+    });
+    nav.append(button);
+    const panel = document.createElement("section");
+    panel.className = "generator-tool-panel";
+    panel.dataset.generatorPanel = id;
+    panel.hidden = id !== "quality";
+    for (const element of elements) if (element) panel.append(element);
+    panels.append(panel);
+  }
+  details.insertBefore(nav, details.querySelector(".info-grid").nextSibling);
+  details.append(panels);
+}
+initializeGeneratorTools();
 
 fileInput.accept = [...VIDEO_EXT].map((ext) => `.${ext}`).join(",");
-fileInput.multiple = false;
+fileInput.multiple = true;
 
 function api(path) {
   return `${API}${path}`;
@@ -673,10 +709,20 @@ async function handleFile(file) {
 function handleFileList(fileList) {
   const files = [...fileList];
   if (files.length === 0) return;
+  queuedVideoFiles = files;
+  batchQueueElement.hidden = files.length < 2;
+  batchQueueElement.replaceChildren();
   if (files.length > 1) {
-    showUnsupported(files[0].name, "파일은 한 번에 하나만 선택할 수 있습니다.");
-    showStudio();
-    return;
+    const label = document.createElement("strong");
+    label.textContent = `선택한 영상 ${files.length}개 · 아래 목록에서 작업할 영상을 선택하세요`;
+    batchQueueElement.append(label);
+    files.forEach((file, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = `${index + 1}. ${file.name}`;
+      button.addEventListener("click", () => { if (!busy) handleFile(file); });
+      batchQueueElement.append(button);
+    });
   }
   handleFile(files[0]);
 }
