@@ -108,19 +108,49 @@ const GifBrowser = (() => {
     return error;
   }
 
+  function explainFailure(error, phase) {
+    const detail = String(error?.ffmpegLog || error?.message || error || "").trim();
+    if (/timeout|timed out/i.test(detail)) return `${phase} 단계가 제한 시간 안에 끝나지 않았습니다. 구간을 줄이거나 출력 크기를 낮춘 뒤 다시 시도해 주세요.`;
+    if (/out of memory|memory access out of bounds|cannot enlarge memory|allocation failed/i.test(detail)) return `${phase} 단계에서 메모리가 부족했습니다. 변환 구간이나 출력 크기를 줄인 뒤 다시 시도해 주세요.`;
+    if (/invalid data|moov atom|could not find codec|decoder.*not found|unsupported codec|error opening input/i.test(detail)) return `동영상 디코딩에 실패했습니다. 파일 형식이나 코덱을 확인해 주세요.\n${detail.slice(-700)}`;
+    if (/no frames|matches no streams|not contain any stream/i.test(detail)) return `선택한 구간에서 변환할 프레임을 찾지 못했습니다. 시작·끝 시간을 확인해 주세요.\n${detail.slice(-500)}`;
+    return `${phase} 단계에서 변환이 실패했습니다. 다시 시도하거나 구간·출력 크기를 조정해 주세요.${detail ? `\n${detail.slice(-700)}` : ""}`;
+  }
+
   async function run(ff, args, onRatio, span, operation, expectedFrames) {
     if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
     const lines = [];
     let ratio = 0;
+    let progressRecord = {};
     const report = (value) => {
       if (!onRatio || operation !== operationVersion) return;
-      ratio = Math.max(ratio, Math.min(0.96, Math.max(0, Number(value) || 0)));
+      ratio = Math.max(ratio, Math.min(0.995, Math.max(0, Number(value) || 0)));
       onRatio(ratio);
     };
     const onLog = ({ message }) => {
-      if (message) lines.push(message);
-      const frame = String(message || "").match(/frame=\s*(\d+)/);
-      if (frame && expectedFrames) report(Number(frame[1]) / expectedFrames);
+      for (const rawLine of String(message || "").split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        lines.push(line);
+        if (lines.join("\n").length > 20000) lines.splice(0, Math.max(1, lines.length - 80));
+        const frame = line.match(/frame=\s*(\d+)/);
+        if (frame && expectedFrames) report(Number(frame[1]) / expectedFrames);
+        const keyValue = line.match(/^(frame|out_time_ms|out_time|progress)=\s*(.+)$/);
+        if (keyValue) {
+          progressRecord[keyValue[1]] = keyValue[2];
+          if (keyValue[1] === "progress") {
+            const frameCount = Number(progressRecord.frame);
+            if (expectedFrames && frameCount > 0) report(frameCount / expectedFrames);
+            const timeText = String(progressRecord.out_time || "");
+            const timeMatch = timeText.match(/(\d+):(\d+):(\d+(?:\.\d+)?)/);
+            const seconds = timeMatch
+              ? Number(timeMatch[1]) * 3600 + Number(timeMatch[2]) * 60 + Number(timeMatch[3])
+              : Number(progressRecord.out_time_ms) / 1e6;
+            if (span > 0 && Number.isFinite(seconds) && seconds > 0) report(seconds / span);
+            progressRecord = {};
+          }
+        }
+      }
     };
     const onProgress = ({ progress, time }) => {
       if (!onRatio) return;
@@ -130,30 +160,23 @@ const GifBrowser = (() => {
         report(Math.min(1, seconds / span));
       }
     };
-    const ticker = setInterval(() => {
-      if (operation !== operationVersion || ratio >= 0.96) return;
-      report(ratio + Math.max(0.004, (0.96 - ratio) * 0.018));
-    }, 180);
     ff.on("log", onLog);
     ff.on("progress", onProgress);
     try {
-      const code = await ff.exec(args);
+      const code = await ff.exec(args, 10 * 60 * 1000);
       if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       if (code !== 0) {
-        const error = new Error(lines.slice(-8).join("\n") || "ffmpeg");
+        const error = new Error(lines.slice(-16).join("\n") || "FFmpeg exited without diagnostic output.");
         error.ffmpeg = true;
+        error.ffmpegLog = lines.slice(-24).join("\n");
+        if (code === 1 && !error.ffmpegLog) error.message = "FFmpeg 작업이 제한 시간 안에 끝나지 않았습니다.";
         throw error;
       }
-      for (let step = 1; step <= 20; step += 1) {
-        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
-        ratio = Math.max(ratio, 0.96 + (0.04 * step) / 20);
-        if (onRatio) onRatio(Math.min(1, ratio));
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
+      if (onRatio) onRatio(1);
     } catch (error) {
+      if (error && !error.ffmpegLog && lines.length) error.ffmpegLog = lines.slice(-24).join("\n");
       throw controlled(error, operation !== operationVersion ? lastControlAction || controlAction : "");
     } finally {
-      clearInterval(ticker);
       ff.off("log", onLog);
       ff.off("progress", onProgress);
     }
@@ -164,7 +187,7 @@ const GifBrowser = (() => {
     const onLog = ({ message }) => lines.push(message);
     ff.on("log", onLog);
     try {
-      await ff.exec(["-hide_banner", "-i", name]);
+      await ff.exec(["-hide_banner", "-i", name], 60_000);
     } catch (error) {
       if (controlAction) throw controlled(error);
     } finally {
@@ -316,21 +339,36 @@ const GifBrowser = (() => {
   }
 
   function previewFrames(onEvent) {
-    if (!sourceBytes) return Promise.resolve();
-    const url = URL.createObjectURL(new Blob([sourceBytes], { type: "video/mp4" }));
+    if (!sourceBytes) return Promise.resolve(false);
+    const previewTypes = {
+      mp4: "video/mp4", m4v: "video/mp4", mov: "video/quicktime", webm: "video/webm",
+      ogv: "video/ogg", ogg: "video/ogg", avi: "video/x-msvideo", wmv: "video/x-ms-wmv",
+      mkv: "video/x-matroska", mpeg: "video/mpeg", mpg: "video/mpeg", "3gp": "video/3gpp",
+    };
+    const url = URL.createObjectURL(new Blob([sourceBytes], { type: previewTypes[inputInfo?.ext] || "application/octet-stream" }));
     const video = document.createElement("video");
     video.muted = true;
     video.playsInline = true;
     video.preload = "auto";
     video.src = url;
     return new Promise((resolve) => {
-      const finish = () => {
+      let settled = false;
+      const timeout = setTimeout(() => finish(false), 5000);
+      const finish = (complete) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        video.pause();
+        video.removeAttribute("src");
+        video.load();
         URL.revokeObjectURL(url);
-        resolve();
+        resolve(complete);
       };
-      video.onerror = finish;
-      video.onloadeddata = async () => {
-        try {
+      video.onerror = () => finish(false);
+      video.onloadeddata = () => {
+        void (async () => {
+          let generated = 0;
+          try {
           const canvas = document.createElement("canvas");
           const width = 320;
           const height = Math.max(2, Math.round(width * (video.videoHeight || 9) / (video.videoWidth || 16)));
@@ -340,22 +378,29 @@ const GifBrowser = (() => {
           const duration = video.duration || inputInfo.duration || 1;
           const count = Math.min(8, Math.max(1, Math.round(duration * 2)));
           for (let index = 0; index < count; index += 1) {
-            const at = Math.min(duration - 0.05, Math.max(0, duration * ((index + 0.5) / count)));
+            const at = Math.max(0, Math.min(duration, duration * ((index + 0.5) / count)));
             await new Promise((seeked) => {
               const done = () => {
                 video.removeEventListener("seeked", done);
+                clearTimeout(seekTimer);
                 seeked();
               };
               video.addEventListener("seeked", done);
+              const seekTimer = setTimeout(done, 750);
               video.currentTime = at;
             });
             context.drawImage(video, 0, 0, width, height);
             const blob = await new Promise((encoded) => canvas.toBlob(encoded, "image/jpeg", 0.8));
-            if (blob) onEvent({ type: "thumb", url: URL.createObjectURL(blob), index: index + 1 });
+            if (blob) {
+              generated += 1;
+              onEvent({ type: "thumb", url: URL.createObjectURL(blob), index: index + 1 });
+            }
           }
-        } finally {
-          finish();
-        }
+          } catch (_) {
+            // The poster frame still provides a preview when browser decoding fails.
+          }
+          finish(generated > 0);
+        })();
       };
     });
   }
@@ -451,12 +496,13 @@ const GifBrowser = (() => {
       const log = await probeLogs(ff, inputName);
       const info = describe(file.name, file.size, log);
       if (!info) {
-        return { ok: false, message: "이 파일은 지원하는 동영상으로 열리지 않습니다. 화면에 표시된 형식의 파일을 선택해 주세요." };
+        const diagnostic = log.split(/\r?\n/).filter(Boolean).slice(-6).join("\n").slice(-700);
+        return { ok: false, message: `동영상 스트림을 읽지 못했습니다. 컨테이너나 비디오 코덱을 확인해 주세요.${diagnostic ? `\n${diagnostic}` : " FFmpeg가 스트림 정보를 반환하지 않았습니다."}` };
       }
       info.id = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
       let posterUrl = "";
       try {
-        await ff.exec(["-y", "-hide_banner", "-ss", "0", "-i", inputName, "-frames:v", "1", "-vf", "scale=720:-2", "poster.jpg"]);
+        await ff.exec(["-y", "-hide_banner", "-ss", "0", "-i", inputName, "-frames:v", "1", "-vf", "scale=720:-2", "poster.jpg"], 60_000);
         posterUrl = rememberUrl(`poster-${info.id}`, await readBlob(ff, "poster.jpg", "image/jpeg"));
         await ff.deleteFile("poster.jpg").catch(() => {});
       } catch (error) {
@@ -497,6 +543,7 @@ const GifBrowser = (() => {
     const filter = videoFilter(info, options);
     const size = outputSize(info, filter, options);
     const expected = Math.max(1, Math.round(options.span * filter.rate));
+    let stage = "변환 준비";
     const emit = (phase, ratio) => {
       const clamped = Math.max(0, Math.min(1, ratio || 0));
       const percent = phase === "encode" ? 55 + clamped * 44 : phase === "palette" ? 25 + clamped * 30 : clamped * 25;
@@ -513,6 +560,7 @@ const GifBrowser = (() => {
       }
       const overlay = await writeOverlay(ff, options.overlay);
       if (checkpoint === "preview") {
+        stage = "프레임 미리보기";
         for (const stale of ["palette.png", "out.gif", "overlay.png"]) {
           if (stale !== "overlay.png" || !overlay) await ff.deleteFile(stale).catch(() => {});
         }
@@ -522,33 +570,36 @@ const GifBrowser = (() => {
         : "";
       const withVideo = (graph) => (overlay ? `${chain},${graph}` : null);
       if (checkpoint === "preview") {
+        if (info.posterUrl) onEvent({ type: "thumb", url: info.posterUrl, index: 1 });
         emit("extract", 0.08);
         try {
-          await Promise.race([
+          const previewReady = await Promise.race([
             previewFrames(onEvent),
-            new Promise((resolve) => setTimeout(resolve, 4000)),
+            new Promise((resolve) => setTimeout(() => resolve(false), 4000)),
           ]);
+          if (previewReady) emit("extract", 1);
         } catch (error) {
           if (error.controlled) throw error;
         }
         if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
-        emit("extract", 1);
       }
       if (checkpoint === "preview" || checkpoint === "palette") {
+        stage = "색상 팔레트 생성";
         resumeCheckpoint.stage = "palette";
-        emit("palette", 0.1);
+        emit("palette", 0);
         const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
-        paletteArgs.push("-an");
+        paletteArgs.push("-an", "-progress", "pipe:1", "-stats_period", "0.25");
         const paletteGraph = `palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`;
         if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
         else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
-        await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, expected);
+        await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, 0);
         resumeCheckpoint.paletteBytes = await ff.readFile("palette.png");
         resumeCheckpoint.stage = "encode";
       } else if (checkpoint === "encode" && saved?.paletteBytes) {
         await ff.writeFile("palette.png", saved.paletteBytes);
       }
       if (checkpoint !== "read") {
+        stage = "GIF 인코딩";
         resumeCheckpoint.stage = "encode";
         emit("encode", 0.05);
         const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
@@ -557,10 +608,16 @@ const GifBrowser = (() => {
           ? `${chain}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`
           : `[0:v]${filter.vf}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`;
         gifArgs.push("-an", "-filter_complex", gifGraph, "-loop", options.loop ? "0" : "-1", "out.gif");
+        gifArgs.splice(gifArgs.length - 1, 0, "-progress", "pipe:1", "-stats_period", "0.25");
         await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
         if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       }
       const gif = await readBlob(ff, "out.gif", "image/gif");
+      stage = "GIF 결과 확인";
+      const signature = new Uint8Array(await gif.slice(0, 6).arrayBuffer());
+      if (gif.size < 14 || String.fromCharCode(...signature) !== "GIF87a" && String.fromCharCode(...signature) !== "GIF89a") {
+        throw new Error("FFmpeg returned an empty or invalid GIF file.");
+      }
       await ff.deleteFile("palette.png").catch(() => {});
       await ff.deleteFile("out.gif").catch(() => {});
       const libraryId = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
@@ -575,9 +632,14 @@ const GifBrowser = (() => {
         bytes: gif.size,
         sizeLabel: formatBytes(gif.size),
       };
-      await saveLibrary(item, gif);
       const previewUrl = rememberUrl(libraryId, gif);
       rememberUrl(`download-${info.id}`, gif);
+      let storageWarning = "";
+      try {
+        await saveLibrary(item, gif);
+      } catch (storageError) {
+        storageWarning = "GIF는 완성됐지만 브라우저 보관함에 저장하지 못했습니다. 다운로드는 사용할 수 있습니다.";
+      }
       resumeCheckpoint = null;
       onEvent({
         type: "done",
@@ -588,9 +650,10 @@ const GifBrowser = (() => {
         height: size.height,
         outputLabel: `${size.width} × ${size.height}`,
         frames: expected,
-        libraryId,
+        libraryId: storageWarning ? null : libraryId,
         previewUrl,
         downloadUrl: urls.get(`download-${info.id}`),
+        storageWarning,
       });
     } catch (error) {
       const action = error.controlled || (operation !== operationVersion ? lastControlAction : controlAction);
@@ -601,7 +664,18 @@ const GifBrowser = (() => {
       }
       if (action === "stop") onEvent({ type: "paused" });
       else if (action === "cancel") onEvent({ type: "cancelled" });
-      else onEvent({ type: "error", message: "변환 중 문제가 생겼습니다. 다른 동영상 파일로 다시 시도해 주세요." });
+      else {
+        resumeCheckpoint = null;
+        controlAction = null;
+        lastControlAction = null;
+        inputReady = false;
+        engineVersion += 1;
+        const failedEngine = ffmpeg;
+        ffmpeg = null;
+        loading = null;
+        try { failedEngine?.terminate(); } catch (_) {}
+        onEvent({ type: "error", message: explainFailure(error, stage) });
+      }
     }
   }
 

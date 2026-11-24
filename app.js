@@ -449,6 +449,9 @@ function markFormat(ext) {
 
 function setProgress(percent, phase) {
   if (continuingConversion && Number(percent) === 0) return;
+  if (Number(percent) === 0 && /fail|실패/i.test(String(phase || ""))) {
+    percent = Number(progressTrack.getAttribute("aria-valuenow")) || 0;
+  }
   let value = Math.max(0, Math.min(100, Math.round(percent)));
   if (continuingConversion) value = Math.max(value, Number(progressTrack.getAttribute("aria-valuenow")) || 0);
   progressFill.style.width = `${value}%`;
@@ -833,14 +836,14 @@ async function startConvert(resume = false) {
         addThumb(event.url || api(`/api/frame/${encodeURIComponent(current.id)}/${event.name}?v=${event.index}`), event.index);
       } else if (event.type === "done") {
         setProgress(100, "변환 완료");
-        workCaption.textContent = `${event.width} × ${event.height} · ${event.frames.toLocaleString("ko-KR")}프레임 · ${event.sizeLabel}`;
+        workCaption.textContent = `${event.width} × ${event.height} · ${event.frames.toLocaleString("ko-KR")}프레임 · ${event.sizeLabel}${event.storageWarning ? ` · ${event.storageWarning}` : ""}`;
         if (event.outputLabel) setText(meta.output, event.outputLabel);
         downloadBtn.disabled = false;
         saveName.textContent = event.filename;
         saveName.title = event.filename;
         convertBtn.textContent = "다시 변환";
         if (event.previewUrl) current.gifUrl = event.downloadUrl || event.previewUrl;
-        if (event.libraryId) {
+        if (event.previewUrl || event.libraryId) {
           gifResult.src = event.previewUrl || api(`/api/library/${event.libraryId}/file?inline=1&t=${Date.now()}`);
           gifPreview.hidden = false;
         }
@@ -860,6 +863,11 @@ async function startConvert(resume = false) {
       } else if (event.type === "cancelled") {
         outcome = "cancelled";
       } else if (event.type === "error") {
+        outcome = "error";
+        downloadBtn.disabled = true;
+        convertBtn.textContent = "다시 시도";
+        setProgress(Number(progressTrack.getAttribute("aria-valuenow")) || 0, "변환 실패");
+        workCaption.textContent = event.message || "변환에 실패했습니다. 설정을 바꾸거나 다시 시도해 주세요.";
         throw new Error(event.message);
       }
     };
@@ -913,6 +921,7 @@ async function startConvert(resume = false) {
       downloadBtn.disabled = true;
       setProgress(0, "변환 실패");
       workCaption.textContent = error.message || "변환에 실패했습니다.";
+      convertBtn.textContent = "다시 시도";
     }
   } finally {
     busy = false;
