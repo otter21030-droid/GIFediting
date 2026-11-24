@@ -70,7 +70,7 @@
           <p>비율을 고르거나 직접 자르기로 원하는 크기를 맞춥니다. 프레임 가장자리를 끌어 크기를 바꾸고, 안쪽을 끌어 위치를 옮깁니다.</p>
           <div class="choice-row" id="aspectChoices" role="radiogroup" aria-label="종횡비"></div>
           <div class="crop-frame is-fixed" id="cropFrame">
-            <img id="poster" alt="" />
+            <video id="poster" muted autoplay loop playsinline></video>
             <div class="crop-rect" id="cropRect">
               <span class="handle n" data-handle="n"></span>
               <span class="handle s" data-handle="s"></span>
@@ -179,6 +179,7 @@
             </div>
           </div>
           <div class="action-col">
+            <button type="button" class="btn primary" id="resumeBtn" hidden>계속 진행</button>
             <button type="button" class="btn stop" id="stopBtn" hidden>중단</button>
             <button type="button" class="btn cancel" id="cancelBtn" hidden>취소</button>
             <div class="download-col">

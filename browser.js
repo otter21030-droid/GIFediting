@@ -10,6 +10,8 @@ const GifBrowser = (() => {
   let lastControlAction = null;
   let operationVersion = 0;
   let engineVersion = 0;
+  let pauseRequested = false;
+  let resumeCheckpoint = null;
   let inputName = "";
   let inputInfo = null;
   let sourceBytes = null;
@@ -484,6 +486,9 @@ const GifBrowser = (() => {
       onEvent({ type: "error", message: "구간 길이가 0초입니다. 끝 시간을 시작보다 뒤로 입력해 주세요." });
       return;
     }
+    const saved = resumeCheckpoint;
+    const checkpoint = saved && saved.id === info.id && JSON.stringify(saved.body) === JSON.stringify(body) ? saved.stage : "preview";
+    if (!saved || checkpoint === "preview") resumeCheckpoint = null;
     controlAction = null;
     lastControlAction = null;
     const operation = ++operationVersion;
@@ -496,6 +501,7 @@ const GifBrowser = (() => {
       onEvent({ type: "progress", phase, percent: Math.min(99, percent), frame: Math.round(clamped * expected), total: expected });
     };
     try {
+      if (saved && checkpoint === "preview") onEvent({ type: "restart" });
       const ff = await engine();
       if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
       if (!inputReady) {
@@ -504,46 +510,58 @@ const GifBrowser = (() => {
         inputReady = true;
       }
       const overlay = await writeOverlay(ff, options.overlay);
-      for (const stale of ["palette.png", "out.gif", "overlay.png"]) {
-        if (stale !== "overlay.png" || !overlay) await ff.deleteFile(stale).catch(() => {});
+      if (checkpoint === "preview") {
+        for (const stale of ["palette.png", "out.gif", "overlay.png"]) {
+          if (stale !== "overlay.png" || !overlay) await ff.deleteFile(stale).catch(() => {});
+        }
       }
       const chain = overlay
         ? `[0:v]${filter.vf}[base];[1:v]scale=${size.width}:${size.height}:flags=lanczos[ov];[base][ov]overlay=0:0:format=auto:shortest=1`
         : "";
       const withVideo = (graph) => (overlay ? `${chain},${graph}` : null);
-      emit("extract", 0.08);
-      try {
-        await Promise.race([
-          previewFrames(onEvent),
-          new Promise((resolve) => setTimeout(resolve, 4000)),
-        ]);
-      } catch (error) {
-        if (error.controlled) throw error;
+      const pauseHere = (stage) => {
+        if (!pauseRequested) return false;
+        resumeCheckpoint = { id: info.id, body: JSON.parse(JSON.stringify(body)), stage };
+        pauseRequested = false;
+        controlAction = null;
+        onEvent({ type: "paused" });
+        return true;
+      };
+      if (checkpoint === "preview") {
+        emit("extract", 0.08);
+        try {
+          await Promise.race([
+            previewFrames(onEvent),
+            new Promise((resolve) => setTimeout(resolve, 4000)),
+          ]);
+        } catch (error) {
+          if (error.controlled) throw error;
+        }
+        if (pauseHere("palette")) return;
+        emit("extract", 1);
       }
-      emit("extract", 1);
-      emit("palette", 0.1);
-      const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
-      paletteArgs.push("-an");
-      const paletteGraph = `palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`;
-      if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
-      else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
-      await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, expected);
-      emit("encode", 0.05);
-      const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
-      const paletteIndex = overlay ? "2" : "1";
-      const gifGraph = overlay
-        ? `${chain}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`
-        : `[0:v]${filter.vf}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`;
-      gifArgs.push(
-        "-an",
-        "-filter_complex",
-        gifGraph,
-        "-loop",
-        options.loop ? "0" : "-1",
-        "out.gif",
-      );
-      await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
-      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+      if (checkpoint === "preview" || checkpoint === "palette") {
+        emit("palette", 0.1);
+        const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
+        paletteArgs.push("-an");
+        const paletteGraph = `palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`;
+        if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
+        else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
+        await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, expected);
+        if (pauseHere("encode")) return;
+      }
+      if (checkpoint !== "read") {
+        emit("encode", 0.05);
+        const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
+        const paletteIndex = overlay ? "2" : "1";
+        const gifGraph = overlay
+          ? `${chain}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`
+          : `[0:v]${filter.vf}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`;
+        gifArgs.push("-an", "-filter_complex", gifGraph, "-loop", options.loop ? "0" : "-1", "out.gif");
+        await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
+        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+        if (pauseHere("read")) return;
+      }
       const gif = await readBlob(ff, "out.gif", "image/gif");
       await ff.deleteFile("palette.png").catch(() => {});
       await ff.deleteFile("out.gif").catch(() => {});
@@ -562,6 +580,7 @@ const GifBrowser = (() => {
       await saveLibrary(item, gif);
       const previewUrl = rememberUrl(libraryId, gif);
       rememberUrl(`download-${info.id}`, gif);
+      resumeCheckpoint = null;
       onEvent({
         type: "done",
         filename: info.downloadName,
@@ -588,8 +607,14 @@ const GifBrowser = (() => {
   }
 
   function control(action) {
+    if (action === "stop") {
+      pauseRequested = true;
+      return;
+    }
     controlAction = action;
     lastControlAction = action;
+    pauseRequested = false;
+    resumeCheckpoint = null;
     operationVersion += 1;
     engineVersion += 1;
     inputReady = false;

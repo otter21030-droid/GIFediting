@@ -35,6 +35,12 @@
 .gif-meta dd { overflow: hidden; margin: 5px 0 0; font-size: 13px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
 .tools-panel { position: sticky; top: 72px; padding: 18px; }
 .tools-heading { display: flex; align-items: center; gap: 12px; margin: 0 0 16px; }
+.gif-add-button { margin-left: auto; white-space: nowrap; }
+.edit-live-preview { display: grid; gap: 8px; margin-bottom: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: #fffdf8; }
+.edit-live-preview strong { font-size: 13px; }
+.edit-live-preview small { color: var(--muted); line-height: 1.4; }
+.edit-live-stage { display: flex; align-items: center; justify-content: center; width: 100%; min-height: 160px; max-height: 240px; overflow: hidden; border-radius: 8px; background: #29231e; }
+.edit-live-stage img { display: block; max-width: 100%; max-height: 220px; object-fit: contain; transition: all .15s ease; }
 .tool-spark { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 13px; background: #fff0e9; color: var(--accent); font-size: 22px; }
 .tools-heading h2 { margin: 0; font-size: 20px; }
 .tools-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }

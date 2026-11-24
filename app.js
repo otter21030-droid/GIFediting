@@ -111,6 +111,7 @@ const progressTrack = document.querySelector("#progressTrack");
 const progressFill = document.querySelector("#progressFill");
 const stopBtn = document.querySelector("#stopBtn");
 const cancelBtn = document.querySelector("#cancelBtn");
+const resumeBtn = document.querySelector("#resumeBtn");
 const downloadBtn = document.querySelector("#downloadBtn");
 const saveName = document.querySelector("#saveName");
 const filmstrip = document.querySelector("#filmstrip");
@@ -147,6 +148,7 @@ let dragDepth = 0;
 let cropDrag = null;
 let browserMode = false;
 let queuedVideoFiles = [];
+let continuingConversion = false;
 
 function initializeGeneratorTools() {
   const blocks = [...details.querySelectorAll(":scope > .edit-block, :scope > .size-block, :scope > .loop-line, :scope > .convert-row")];
@@ -160,6 +162,15 @@ function initializeGeneratorTools() {
   nav.setAttribute("aria-label", "GIF 생성 도구");
   const panels = document.createElement("div");
   panels.className = "generator-tool-panels";
+  const previewPanel = document.createElement("section");
+  previewPanel.className = "generator-preview-panel";
+  const previewTitle = document.createElement("h2");
+  previewTitle.textContent = "영상 미리보기";
+  previewPanel.append(previewTitle, cropFrame);
+  const workspace = document.createElement("div");
+  workspace.className = "generator-workspace-grid";
+  const toolColumn = document.createElement("div");
+  toolColumn.className = "generator-tool-column";
   for (const [id, label, elements] of tools) {
     const button = document.createElement("button");
     button.type = "button";
@@ -177,8 +188,9 @@ function initializeGeneratorTools() {
     for (const element of elements) if (element) panel.append(element);
     panels.append(panel);
   }
-  details.insertBefore(nav, details.querySelector(".info-grid").nextSibling);
-  details.append(panels);
+  toolColumn.append(nav, panels);
+  workspace.append(previewPanel, toolColumn);
+  details.append(workspace);
 }
 initializeGeneratorTools();
 
@@ -436,6 +448,7 @@ function markFormat(ext) {
 }
 
 function setProgress(percent, phase) {
+  if (continuingConversion && Number(percent) === 0) return;
   const value = Math.max(0, Math.min(100, Math.round(percent)));
   progressFill.style.width = `${value}%`;
   progressTrack.setAttribute("aria-valuenow", String(value));
@@ -483,7 +496,7 @@ function paintCrop() {
   const box = sourceCrop();
   cropFrame.classList.toggle("is-fixed", selectedAspect === "original");
   cropFrame.classList.toggle("is-free", selectedAspect === "free");
-  if (!box || !poster.naturalWidth || !poster.clientWidth) {
+  if (!box || !(poster.videoWidth || poster.naturalWidth) || !poster.clientWidth) {
     cropRect.hidden = true;
     return;
   }
@@ -612,11 +625,12 @@ function applyInfo(file) {
   trimEnd.max = String(duration || 0);
   trimStart.value = "0";
   trimEnd.value = String(duration || 0);
-  cropFrame.hidden = !file.hasPoster;
-  if (file.hasPoster) {
-    poster.onload = () => paintCrop();
-    poster.src = file.posterUrl || api(`/api/poster/${file.id}?t=${Date.now()}`);
-    poster.alt = `${file.baseName} 미리보기`;
+  cropFrame.hidden = !file.hasPoster && !file.sourceUrl;
+  if (file.hasPoster || file.sourceUrl) {
+    poster.onloadedmetadata = () => paintCrop();
+    poster.poster = file.posterUrl || "";
+    poster.src = file.sourceUrl || file.posterUrl || api(`/api/poster/${file.id}?t=${Date.now()}`);
+    poster.play().catch(() => {});
   } else {
     poster.removeAttribute("src");
     cropRect.hidden = true;
@@ -671,6 +685,8 @@ async function handleFile(file) {
     return;
   }
   clearAlert();
+  if (current?.sourceUrl) URL.revokeObjectURL(current.sourceUrl);
+  file.previewUrl = URL.createObjectURL(file);
   showStudio();
   dropTitle.textContent = browserMode ? "변환 엔진을 준비하고 있습니다" : "파일 정보를 읽고 있습니다";
   dropStatus.textContent = file.name;
@@ -683,6 +699,7 @@ async function handleFile(file) {
         showUnsupported(file.name, payload.message || "이 형식은 변환할 수 없습니다.");
         return;
       }
+      payload.file.sourceUrl = file.previewUrl;
       applyInfo(payload.file);
       return;
     }
@@ -696,6 +713,7 @@ async function handleFile(file) {
       showUnsupported(file.name, payload.message || "이 형식은 변환할 수 없습니다.");
       return;
     }
+    payload.file.sourceUrl = file.previewUrl;
     applyInfo(payload.file);
   } catch (error) {
     showUnsupported(file.name, browserMode
@@ -764,7 +782,7 @@ function phaseText(event) {
   return `프레임 추출 ${event.frame || 0}${event.total ? ` / ${event.total}` : ""}`;
 }
 
-async function startConvert() {
+async function startConvert(resume = false) {
   if (!current || busy) return;
   const earlyRange = clipRange();
   if (earlyRange.span <= 0) {
@@ -792,7 +810,13 @@ async function startConvert() {
   textColor.disabled = true;
   textWeight.disabled = true;
   textOpacity.disabled = true;
-  resetWork(current.downloadName);
+  resumeBtn.hidden = true;
+  continuingConversion = resume;
+  if (!resume) resetWork(current.downloadName);
+  else {
+    setRunButtons(true);
+    work.hidden = false;
+  }
   setProgress(0, "프레임 추출 준비");
   const range = earlyRange;
   let outcome = "done";
@@ -824,6 +848,14 @@ async function startConvert() {
         setProgress(Number(progressTrack.getAttribute("aria-valuenow")) || 0, "변환을 중단했습니다");
         workCaption.textContent = "변환을 중단했습니다. 같은 파일로 다시 변환할 수 있습니다.";
         downloadBtn.disabled = true;
+      } else if (event.type === "paused") {
+        outcome = "paused";
+        setProgress(Number(progressTrack.getAttribute("aria-valuenow")) || 0, "변환을 잠시 멈췄습니다");
+        workCaption.textContent = "작업 상태를 유지했습니다. 계속 진행을 눌러 이어서 변환하세요.";
+        downloadBtn.disabled = true;
+      } else if (event.type === "restart") {
+        continuingConversion = false;
+        resetWork(current.downloadName);
       } else if (event.type === "cancelled") {
         outcome = "cancelled";
       } else if (event.type === "error") {
@@ -903,8 +935,12 @@ async function startConvert() {
     for (const button of document.querySelectorAll("#sizeChoices button, #qualityChoices button, #aspectChoices button")) {
       button.disabled = false;
     }
+    continuingConversion = false;
+    resumeBtn.hidden = outcome !== "paused" || !browserMode;
   }
 }
+
+resumeBtn.addEventListener("click", () => startConvert(true));
 
 async function halt(action) {
   if (!busy || !current) return;
