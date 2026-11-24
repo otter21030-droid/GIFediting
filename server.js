@@ -32,11 +32,13 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".gif": "image/gif",
   ".jpg": "image/jpeg",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".wasm": "application/wasm",
 };
 
 function applyCors(res) {
@@ -974,6 +976,15 @@ function route(req, res) {
     const name = STATIC_FILES.get(url.pathname);
     serveFile(res, path.join(ROOT, name), MIME[path.extname(name)] || "application/octet-stream");
     return;
+  }
+  if (req.method === "GET" && !url.pathname.startsWith("/api/")) {
+    const relative = decodeURIComponent(url.pathname).replace(/^\/+/, "");
+    const filePath = path.resolve(ROOT, relative);
+    const rootPrefix = ROOT.endsWith(path.sep) ? ROOT : `${ROOT}${path.sep}`;
+    if ((filePath === ROOT || filePath.startsWith(rootPrefix)) && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      serveFile(res, filePath, MIME[path.extname(filePath)] || "application/octet-stream");
+      return;
+    }
   }
   sendJson(res, 404, { ok: false, message: "페이지를 찾지 못했습니다." });
 }

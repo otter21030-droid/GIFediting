@@ -1,7 +1,8 @@
 const GifBrowser = (() => {
-  const CORE = "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/esm";
-  const FFMPEG = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/index.js";
-  const WORKER = "https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/worker.js";
+  const pageRoot = new URL(".", document.baseURI);
+  const FFMPEG = new URL("vendor/ffmpeg/index.js", pageRoot).href;
+  const CORE_JS = new URL("vendor/core/ffmpeg-core.js", pageRoot).href;
+  const CORE_WASM = new URL("vendor/core/ffmpeg-core.wasm", pageRoot).href;
 
   let ffmpeg = null;
   let loading = null;
@@ -70,18 +71,6 @@ const GifBrowser = (() => {
     return match ? match[1] : "mp4";
   }
 
-  async function blobURL(url, type) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("engine");
-    return URL.createObjectURL(new Blob([await response.arrayBuffer()], { type }));
-  }
-
-  async function workerURL() {
-    const source = await (await fetch(WORKER)).text();
-    const rewritten = source.replaceAll("from \"./", "from \"https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.15/dist/esm/");
-    return URL.createObjectURL(new Blob([rewritten], { type: "text/javascript" }));
-  }
-
   async function engine() {
     if (ffmpeg) return ffmpeg;
     if (!loading) {
@@ -89,9 +78,8 @@ const GifBrowser = (() => {
         const module = await import(FFMPEG);
         const instance = new module.FFmpeg();
         await instance.load({
-          classWorkerURL: await workerURL(),
-          coreURL: await blobURL(`${CORE}/ffmpeg-core.js`, "text/javascript"),
-          wasmURL: await blobURL(`${CORE}/ffmpeg-core.wasm`, "application/wasm"),
+          coreURL: CORE_JS,
+          wasmURL: CORE_WASM,
         });
         ffmpeg = instance;
         return instance;
@@ -115,7 +103,9 @@ const GifBrowser = (() => {
 
   async function run(ff, args, onRatio, span) {
     if (controlAction) throw controlled(new Error(controlAction));
+    const lines = [];
     const onLog = ({ message }) => {
+      if (message) lines.push(message);
       const frame = String(message || "").match(/frame=\s*(\d+)/);
       if (frame && onRatio) onRatio(0, Number(frame[1]));
     };
@@ -130,8 +120,13 @@ const GifBrowser = (() => {
     ff.on("log", onLog);
     ff.on("progress", onProgress);
     try {
-      await ff.exec(args);
+      const code = await ff.exec(args);
       if (controlAction) throw controlled(new Error(controlAction));
+      if (code !== 0) {
+        const error = new Error(lines.slice(-8).join("\n") || "ffmpeg");
+        error.ffmpeg = true;
+        throw error;
+      }
     } catch (error) {
       throw controlled(error);
     } finally {
@@ -287,11 +282,58 @@ const GifBrowser = (() => {
   }
 
   function mediaArgs(options, extra) {
-    const args = ["-y", "-hide_banner"];
+    // Interrupted conversions can leave palette.png/out.gif in MEMFS. Always
+    // overwrite them so the next run can start with the same width/options.
+    const args = ["-y", "-hide_banner", "-nostdin"];
     if (!options.full) args.push("-ss", options.start.toFixed(3), "-t", options.span.toFixed(3));
     args.push("-i", inputName);
     if (extra) args.push(...extra);
     return args;
+  }
+
+  function previewFrames(onEvent) {
+    if (!sourceBytes) return Promise.resolve();
+    const url = URL.createObjectURL(new Blob([sourceBytes], { type: "video/mp4" }));
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.src = url;
+    return new Promise((resolve) => {
+      const finish = () => {
+        URL.revokeObjectURL(url);
+        resolve();
+      };
+      video.onerror = finish;
+      video.onloadeddata = async () => {
+        try {
+          const canvas = document.createElement("canvas");
+          const width = 320;
+          const height = Math.max(2, Math.round(width * (video.videoHeight || 9) / (video.videoWidth || 16)));
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          const duration = video.duration || inputInfo.duration || 1;
+          const count = Math.min(8, Math.max(1, Math.round(duration * 2)));
+          for (let index = 0; index < count; index += 1) {
+            const at = Math.min(duration - 0.05, Math.max(0, duration * ((index + 0.5) / count)));
+            await new Promise((seeked) => {
+              const done = () => {
+                video.removeEventListener("seeked", done);
+                seeked();
+              };
+              video.addEventListener("seeked", done);
+              video.currentTime = at;
+            });
+            context.drawImage(video, 0, 0, width, height);
+            const blob = await new Promise((encoded) => canvas.toBlob(encoded, "image/jpeg", 0.8));
+            if (blob) onEvent({ type: "thumb", url: URL.createObjectURL(blob), index: index + 1 });
+          }
+        } finally {
+          finish();
+        }
+      };
+    });
   }
 
   function rememberUrl(id, blob) {
@@ -436,46 +478,40 @@ const GifBrowser = (() => {
         inputReady = true;
       }
       const overlay = await writeOverlay(ff, options.overlay);
-      const chain = overlay
-        ? `[0:v]${filter.vf}[base];[1:v][base]scale2ref[ov][base2];[base2][ov]overlay=0:0:format=auto`
-        : `[0:v]${filter.vf}`;
-      emit("extract", 0.05);
-      const thumbArgs = mediaArgs(options, overlay ? ["-i", "overlay.png"] : []);
-      thumbArgs.push(
-        "-an",
-        "-filter_complex",
-        `${chain},fps=${Math.min(8, filter.rate)}`,
-        "-frames:v",
-        "8",
-        "thumb%02d.jpg",
-      );
-      await run(ff, thumbArgs, (ratio) => emit("extract", ratio), options.span);
-      for (let index = 1; index <= 8; index += 1) {
-        const name = `thumb${String(index).padStart(2, "0")}.jpg`;
-        try {
-          const blob = await readBlob(ff, name, "image/jpeg");
-          onEvent({ type: "thumb", url: URL.createObjectURL(blob), index });
-          await ff.deleteFile(name);
-        } catch (error) {
-          break;
-        }
+      for (const stale of ["palette.png", "out.gif", "overlay.png"]) {
+        if (stale !== "overlay.png" || !overlay) await ff.deleteFile(stale).catch(() => {});
       }
+      const chain = overlay
+        ? `[0:v]${filter.vf}[base];[1:v]scale=${size.width}:${size.height}:flags=lanczos[ov];[base][ov]overlay=0:0:format=auto:shortest=1`
+        : "";
+      const withVideo = (graph) => (overlay ? `${chain},${graph}` : null);
+      emit("extract", 0.08);
+      try {
+        await Promise.race([
+          previewFrames(onEvent),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+      } catch (error) {
+        if (error.controlled) throw error;
+      }
+      emit("extract", 1);
       emit("palette", 0.1);
-      const paletteArgs = mediaArgs(options, overlay ? ["-i", "overlay.png"] : []);
-      paletteArgs.push(
-        "-an",
-        "-filter_complex",
-        `${chain},palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`,
-        "palette.png",
-      );
+      const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
+      paletteArgs.push("-an");
+      const paletteGraph = `palettegen=stats_mode=diff:reserve_transparent=0:max_colors=${options.colors}`;
+      if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
+      else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
       await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span);
       emit("encode", 0.05);
-      const gifArgs = mediaArgs(options, overlay ? ["-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
+      const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
       const paletteIndex = overlay ? "2" : "1";
+      const gifGraph = overlay
+        ? `${chain}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`
+        : `[0:v]${filter.vf}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`;
       gifArgs.push(
         "-an",
         "-filter_complex",
-        `${chain}[x];[x][${paletteIndex}:v]paletteuse=dither=bayer:bayer_scale=3:diff_mode=rectangle`,
+        gifGraph,
         "-loop",
         options.loop ? "0" : "-1",
         "out.gif",
