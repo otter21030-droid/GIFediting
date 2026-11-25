@@ -6,11 +6,8 @@ const GifBrowser = (() => {
 
   let ffmpeg = null;
   let loading = null;
-  let controlAction = null;
-  let lastControlAction = null;
   let operationVersion = 0;
   let engineVersion = 0;
-  let resumeCheckpoint = null;
   let inputName = "";
   let inputInfo = null;
   let sourceBytes = null;
@@ -103,11 +100,6 @@ const GifBrowser = (() => {
     return loading;
   }
 
-  function controlled(error, action = lastControlAction || controlAction) {
-    if (action) error.controlled = action;
-    return error;
-  }
-
   function explainFailure(error, phase) {
     const detail = String(error?.ffmpegLog || error?.message || error || "").trim();
     if (/timeout|timed out/i.test(detail)) return `${phase} 단계가 제한 시간 안에 끝나지 않았습니다. 구간을 줄이거나 출력 크기를 낮춘 뒤 다시 시도해 주세요.`;
@@ -118,7 +110,7 @@ const GifBrowser = (() => {
   }
 
   async function run(ff, args, onRatio, span, operation, expectedFrames) {
-    if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+    if (operation !== operationVersion) throw new Error("Conversion was superseded.");
     const lines = [];
     let ratio = 0;
     let progressRecord = {};
@@ -164,7 +156,7 @@ const GifBrowser = (() => {
     ff.on("progress", onProgress);
     try {
       const code = await ff.exec(args, 10 * 60 * 1000);
-      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+      if (operation !== operationVersion) throw new Error("Conversion was superseded.");
       if (code !== 0) {
         const error = new Error(lines.slice(-16).join("\n") || "FFmpeg exited without diagnostic output.");
         error.ffmpeg = true;
@@ -175,7 +167,7 @@ const GifBrowser = (() => {
       if (onRatio) onRatio(1);
     } catch (error) {
       if (error && !error.ffmpegLog && lines.length) error.ffmpegLog = lines.slice(-24).join("\n");
-      throw controlled(error, operation !== operationVersion ? lastControlAction || controlAction : "");
+      throw error;
     } finally {
       ff.off("log", onLog);
       ff.off("progress", onProgress);
@@ -189,7 +181,6 @@ const GifBrowser = (() => {
     try {
       await ff.exec(["-hide_banner", "-i", name], 60_000);
     } catch (error) {
-      if (controlAction) throw controlled(error);
     } finally {
       ff.off("log", onLog);
     }
@@ -531,14 +522,7 @@ const GifBrowser = (() => {
       onEvent({ type: "error", message: "구간 길이가 0초입니다. 끝 시간을 시작보다 뒤로 입력해 주세요." });
       return;
     }
-    const saved = resumeCheckpoint;
-    const canResume = saved && saved.id === info.id && JSON.stringify(saved.body) === JSON.stringify(body);
-    const checkpoint = canResume ? saved.stage : "preview";
-    if (!canResume) {
-      resumeCheckpoint = { id: info.id, body: JSON.parse(JSON.stringify(body)), stage: "preview", paletteBytes: null };
-    }
-    controlAction = null;
-    lastControlAction = null;
+    const checkpoint = "preview";
     const operation = ++operationVersion;
     const filter = videoFilter(info, options);
     const size = outputSize(info, filter, options);
@@ -550,9 +534,8 @@ const GifBrowser = (() => {
       onEvent({ type: "progress", phase, percent: Math.min(99, percent), frame: Math.round(clamped * expected), total: expected });
     };
     try {
-      if (saved && checkpoint === "preview") onEvent({ type: "restart" });
       const ff = await engine();
-      if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+      if (operation !== operationVersion) throw new Error("Conversion was superseded.");
       if (!inputReady) {
         if (!sourceBytes) throw new Error("missing");
         await ff.writeFile(inputName, sourceBytes);
@@ -579,13 +562,12 @@ const GifBrowser = (() => {
           ]);
           if (previewReady) emit("extract", 1);
         } catch (error) {
-          if (error.controlled) throw error;
+          throw error;
         }
-        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+        if (operation !== operationVersion) throw new Error("Conversion was superseded.");
       }
       if (checkpoint === "preview" || checkpoint === "palette") {
         stage = "색상 팔레트 생성";
-        resumeCheckpoint.stage = "palette";
         emit("palette", 0);
         const paletteArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png"] : []);
         paletteArgs.push("-an", "-progress", "pipe:1", "-stats_period", "0.25");
@@ -593,14 +575,9 @@ const GifBrowser = (() => {
         if (overlay) paletteArgs.push("-filter_complex", withVideo(paletteGraph), "palette.png");
         else paletteArgs.push("-vf", `${filter.vf},${paletteGraph}`, "palette.png");
         await run(ff, paletteArgs, (ratio) => emit("palette", ratio), options.span, operation, 0);
-        resumeCheckpoint.paletteBytes = await ff.readFile("palette.png");
-        resumeCheckpoint.stage = "encode";
-      } else if (checkpoint === "encode" && saved?.paletteBytes) {
-        await ff.writeFile("palette.png", saved.paletteBytes);
       }
       if (checkpoint !== "read") {
         stage = "GIF 인코딩";
-        resumeCheckpoint.stage = "encode";
         emit("encode", 0.05);
         const gifArgs = mediaArgs(options, overlay ? ["-loop", "1", "-i", "overlay.png", "-i", "palette.png"] : ["-i", "palette.png"]);
         const paletteIndex = overlay ? "2" : "1";
@@ -610,7 +587,7 @@ const GifBrowser = (() => {
         gifArgs.push("-an", "-filter_complex", gifGraph, "-loop", options.loop ? "0" : "-1", "out.gif");
         gifArgs.splice(gifArgs.length - 1, 0, "-progress", "pipe:1", "-stats_period", "0.25");
         await run(ff, gifArgs, (ratio) => emit("encode", ratio), options.span, operation, expected);
-        if (operation !== operationVersion) throw controlled(new Error("conversion interrupted"));
+        if (operation !== operationVersion) throw new Error("Conversion was superseded.");
       }
       const gif = await readBlob(ff, "out.gif", "image/gif");
       stage = "GIF 결과 확인";
@@ -640,7 +617,6 @@ const GifBrowser = (() => {
       } catch (storageError) {
         storageWarning = "GIF는 완성됐지만 브라우저 보관함에 저장하지 못했습니다. 다운로드는 사용할 수 있습니다.";
       }
-      resumeCheckpoint = null;
       onEvent({
         type: "done",
         filename: info.downloadName,
@@ -656,43 +632,15 @@ const GifBrowser = (() => {
         storageWarning,
       });
     } catch (error) {
-      const action = error.controlled || (operation !== operationVersion ? lastControlAction : controlAction);
-      if (operation === operationVersion) controlAction = null;
-      else if (operationVersion === operation + 1) {
-        controlAction = null;
-        lastControlAction = null;
-      }
-      if (action === "stop") onEvent({ type: "paused" });
-      else if (action === "cancel") onEvent({ type: "cancelled" });
-      else {
-        resumeCheckpoint = null;
-        controlAction = null;
-        lastControlAction = null;
-        inputReady = false;
-        engineVersion += 1;
-        const failedEngine = ffmpeg;
-        ffmpeg = null;
-        loading = null;
-        try { failedEngine?.terminate(); } catch (_) {}
-        onEvent({ type: "error", message: explainFailure(error, stage) });
-      }
+      inputReady = false;
+      engineVersion += 1;
+      const failedEngine = ffmpeg;
+      ffmpeg = null;
+      loading = null;
+      try { failedEngine?.terminate(); } catch (_) {}
+      onEvent({ type: "error", message: explainFailure(error, stage) });
     }
   }
 
-  function control(action) {
-    controlAction = action;
-    lastControlAction = action;
-    if (action === "cancel") resumeCheckpoint = null;
-    operationVersion += 1;
-    engineVersion += 1;
-    inputReady = false;
-    const current = ffmpeg;
-    ffmpeg = null;
-    loading = null;
-    if (current) {
-      try { current.terminate(); } catch (_) {}
-    }
-  }
-
-  return { inspect, convert, control, library, remove };
+  return { inspect, convert, library, remove };
 })();

@@ -109,9 +109,6 @@ const phaseLabel = document.querySelector("#phaseLabel");
 const percentLabel = document.querySelector("#percentLabel");
 const progressTrack = document.querySelector("#progressTrack");
 const progressFill = document.querySelector("#progressFill");
-const stopBtn = document.querySelector("#stopBtn");
-const cancelBtn = document.querySelector("#cancelBtn");
-const resumeBtn = document.querySelector("#resumeBtn");
 const downloadBtn = document.querySelector("#downloadBtn");
 const saveName = document.querySelector("#saveName");
 const filmstrip = document.querySelector("#filmstrip");
@@ -148,7 +145,6 @@ let dragDepth = 0;
 let cropDrag = null;
 let browserMode = false;
 let queuedVideoFiles = [];
-let continuingConversion = false;
 
 function initializeGeneratorTools() {
   const blocks = [...details.querySelectorAll(":scope > .edit-block, :scope > .size-block, :scope > .loop-line, :scope > .convert-row")];
@@ -448,23 +444,14 @@ function markFormat(ext) {
 }
 
 function setProgress(percent, phase) {
-  if (continuingConversion && Number(percent) === 0) return;
   if (Number(percent) === 0 && /fail|실패/i.test(String(phase || ""))) {
     percent = Number(progressTrack.getAttribute("aria-valuenow")) || 0;
   }
   let value = Math.max(0, Math.min(100, Math.round(percent)));
-  if (continuingConversion) value = Math.max(value, Number(progressTrack.getAttribute("aria-valuenow")) || 0);
   progressFill.style.width = `${value}%`;
   progressTrack.setAttribute("aria-valuenow", String(value));
   percentLabel.textContent = `${value}%`;
   phaseLabel.textContent = phase;
-}
-
-function setRunButtons(running) {
-  stopBtn.hidden = !running;
-  cancelBtn.hidden = !running;
-  stopBtn.disabled = false;
-  cancelBtn.disabled = false;
 }
 
 function resetWork(saveAs) {
@@ -481,7 +468,6 @@ function resetWork(saveAs) {
   saveName.title = saveAs || "";
   gifPreview.hidden = true;
   gifResult.removeAttribute("src");
-  setRunButtons(true);
 }
 
 function addThumb(src, index) {
@@ -786,7 +772,7 @@ function phaseText(event) {
   return `프레임 추출 ${event.frame || 0}${event.total ? ` / ${event.total}` : ""}`;
 }
 
-async function startConvert(resume = false) {
+async function startConvert() {
   if (!current || busy) return;
   const earlyRange = clipRange();
   if (earlyRange.span <= 0) {
@@ -814,13 +800,7 @@ async function startConvert(resume = false) {
   textColor.disabled = true;
   textWeight.disabled = true;
   textOpacity.disabled = true;
-  resumeBtn.hidden = true;
-  continuingConversion = resume;
-  if (!resume) resetWork(current.downloadName);
-  else {
-    setRunButtons(true);
-    work.hidden = false;
-  }
+  resetWork(current.downloadName);
   setProgress(0, "프레임 추출 준비");
   const range = earlyRange;
   let outcome = "done";
@@ -847,21 +827,6 @@ async function startConvert(resume = false) {
           gifResult.src = event.previewUrl || api(`/api/library/${event.libraryId}/file?inline=1&t=${Date.now()}`);
           gifPreview.hidden = false;
         }
-      } else if (event.type === "stopped") {
-        outcome = "stopped";
-        setProgress(Number(progressTrack.getAttribute("aria-valuenow")) || 0, "변환을 중단했습니다");
-        workCaption.textContent = "변환을 중단했습니다. 같은 파일로 다시 변환할 수 있습니다.";
-        downloadBtn.disabled = true;
-      } else if (event.type === "paused") {
-        outcome = "paused";
-        setProgress(Number(progressTrack.getAttribute("aria-valuenow")) || 0, "변환을 잠시 멈췄습니다");
-        workCaption.textContent = "작업 상태를 유지했습니다. 계속 진행을 눌러 이어서 변환하세요.";
-        downloadBtn.disabled = true;
-      } else if (event.type === "restart") {
-        continuingConversion = false;
-        resetWork(current.downloadName);
-      } else if (event.type === "cancelled") {
-        outcome = "cancelled";
       } else if (event.type === "error") {
         outcome = "error";
         downloadBtn.disabled = true;
@@ -910,12 +875,6 @@ async function startConvert(resume = false) {
     }
     await readSSE(response, handle);
     }
-    if (outcome === "cancelled") {
-      work.hidden = true;
-      filmstrip.replaceChildren();
-      downloadBtn.disabled = true;
-      workCaption.textContent = "변환을 취소했습니다.";
-    }
   } catch (error) {
     if (outcome === "done") {
       downloadBtn.disabled = true;
@@ -925,7 +884,6 @@ async function startConvert(resume = false) {
     }
   } finally {
     busy = false;
-    setRunButtons(false);
     pickBtn.disabled = false;
     convertBtn.disabled = !current;
     dropzone.classList.remove("is-busy");
@@ -945,30 +903,6 @@ async function startConvert(resume = false) {
     for (const button of document.querySelectorAll("#sizeChoices button, #qualityChoices button, #aspectChoices button")) {
       button.disabled = false;
     }
-    continuingConversion = false;
-    resumeBtn.hidden = outcome !== "paused" || !browserMode;
-  }
-}
-
-resumeBtn.addEventListener("click", () => startConvert(true));
-
-async function halt(action) {
-  if (!busy || !current) return;
-  stopBtn.disabled = true;
-  cancelBtn.disabled = true;
-  phaseLabel.textContent = action === "stop" ? "중단하는 중" : "취소하는 중";
-  try {
-    if (browserMode) {
-      GifBrowser.control(action);
-      return;
-    }
-    await fetch(api("/api/control"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: current.id, action }),
-    });
-  } catch (error) {
-    workCaption.textContent = "중단 요청을 보내지 못했습니다.";
   }
 }
 
@@ -1373,8 +1307,6 @@ downloadBtn.addEventListener("click", () => {
   });
 });
 convertBtn.addEventListener("click", startConvert);
-stopBtn.addEventListener("click", () => halt("stop"));
-cancelBtn.addEventListener("click", () => halt("cancel"));
 libraryBtn.addEventListener("click", () => {
   if (libraryView.hidden) showLibrary();
   else showStudio();

@@ -844,25 +844,6 @@ main {
   flex: 0 0 auto;
 }
 
-.btn.stop,
-.btn.cancel {
-  height: 48px;
-  min-width: 84px;
-  padding: 0 14px;
-  font-size: 16px;
-}
-
-.btn.stop {
-  background: #3a312a;
-  color: white;
-}
-
-.btn.cancel {
-  background: #fffdf8;
-  color: var(--ink);
-  border: 1px solid #c9bfb0;
-}
-
 .library {
   width: min(1120px, calc(100% - 80px));
   margin: 28px auto 72px;
